@@ -119,12 +119,13 @@ def inject_images(doc: DocxTemplate, ctx: Dict[str, Any]) -> None:
 
         tmp_name = f"_img_{uuid4().hex}.png"
         tmp_path = os.path.join(OUTPUT_DIR, tmp_name)
+
         try:
             with open(tmp_path, "wb") as f:
                 f.write(img_bytes)
-            
-            # ✔ USTAWIONO STAŁY ROZMIAR 4,5 cm × 4,5 cm
-            row["IMAGE"] = InlineImage(doc, tmp_path, width=Mm(45), height=Mm(45))
+
+            # ✔ FINALNY ROZMIAR 4,7 cm × 4,7 cm
+            row["IMAGE"] = InlineImage(doc, tmp_path, width=Mm(47), height=Mm(47))
 
         except Exception:
             row["IMAGE"] = ""
@@ -132,10 +133,8 @@ def inject_images(doc: DocxTemplate, ctx: Dict[str, Any]) -> None:
 
 @app.post("/generate-docx")
 async def generate_docx(
-    payload: str = Form(..., description="JSON z danymi oferty (Ofertuś)"),
-    template_file: Optional[UploadFile] = File(
-        None, description="Opcjonalny szablon .docx (docxtpl)"
-    ),
+    payload: str = Form(...),
+    template_file: Optional[UploadFile] = File(None),
 ):
     try:
         data = json.loads(payload)
@@ -152,10 +151,7 @@ async def generate_docx(
         if not os.path.exists(DEFAULT_TEMPLATE):
             raise HTTPException(
                 status_code=500,
-                detail=(
-                    "Brak domyślnego szablonu 'oferta_template.docx' w folderze 'templates'. "
-                    "Dodaj tam swój szablon lub wyślij go w polu 'template_file'."
-                ),
+                detail="Brak szablonu oferta_template.docx w folderze templates."
             )
         template_path = DEFAULT_TEMPLATE
 
@@ -170,7 +166,7 @@ async def generate_docx(
     try:
         doc.render(ctx)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Błąd renderowania szablonu: {e}")
+        raise HTTPException(status_code=500, detail=f"Błąd renderowania: {e}")
 
     out_name = f"oferta_{uuid4().hex}.docx"
     out_path = os.path.join(OUTPUT_DIR, out_name)
@@ -200,5 +196,4 @@ async def preview_context(payload: str = Form(...)):
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
