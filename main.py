@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,7 +56,7 @@ def normalize_items(data_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "ILOSC": ilosc,
             "opis": opis,
             "OPIS": opis,
-            "IMAGE": None,  # uzupełniamy później
+            "IMAGE": None,
         }
 
         img_b64 = itm.get("image_base64") or itm.get("image") or ""
@@ -70,7 +69,6 @@ def normalize_items(data_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def build_context(data: Dict[str, Any]) -> Dict[str, Any]:
     ctx: Dict[str, Any] = {}
 
-    # Podstawowe pola – większość może być pusta
     ctx["data"] = data.get("data", "")
     ctx["DATA"] = ctx["data"]
     ctx["NUMER_OFERTY"] = data.get("numer_oferty", "")
@@ -124,7 +122,10 @@ def inject_images(doc: DocxTemplate, ctx: Dict[str, Any]) -> None:
         try:
             with open(tmp_path, "wb") as f:
                 f.write(img_bytes)
-            row["IMAGE"] = InlineImage(doc, tmp_path, width=Mm(70))
+            
+            # ✔ USTAWIONO STAŁY ROZMIAR 4,5 cm × 4,5 cm
+            row["IMAGE"] = InlineImage(doc, tmp_path, width=Mm(45), height=Mm(45))
+
         except Exception:
             row["IMAGE"] = ""
 
