@@ -76,9 +76,7 @@ def build_context(data: Dict[str, Any]) -> Dict[str, Any]:
     ctx["NUMER_OFERTY"] = data.get("numer_oferty", "")
 
     systemy: List[str] = data.get("systemy", [])
-    for i in range(5):
-        key = f"SYSTEM{i+1}"
-        ctx[key] = systemy[i] if i < len(systemy) else ""
+    ctx["SYSTEMY"] = [s for s in systemy if s.strip()]
 
     ctx["KOLOR"] = data.get("kolor", "")
     ctx["KWOTA_NETTO"] = data.get("kwota_netto", "")
