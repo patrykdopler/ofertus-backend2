@@ -1,15 +1,14 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from docxtpl import DocxTemplate, InlineImage
-from docx.shared import Mm
-from uuid import uuid4
-import os
-import json
+import io
 import base64
-from typing import Optional, List, Dict, Any
+from fastapi import FastAPI, UploadFile, File, Form
+from docxtpl import DocxTemplate, InlineImage
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import Response
+from PIL import Image
+from typing import List, Dict, Any
+from pydantic import BaseModel
 
-app = FastAPI(title="Ofertus Backend v3", version="3.0.0")
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -19,62 +18,84 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
-OUTPUT_DIR = os.path.join(BASE_DIR, "generated")
+# -----------------------------------------
+#  NORMALIZACJA OBRAZÓW 4.7 CM x 4.7 CM
+# -----------------------------------------
+def make_inline_image(doc: DocxTemplate, image_bytes: bytes) -> InlineImage:
+    image = Image.open(io.BytesIO(image_bytes))
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
 
-os.makedirs(TEMPLATES_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-DEFAULT_TEMPLATE = os.path.join(TEMPLATES_DIR, "oferta_template.docx")
-
-
-@app.get("/health")
-def health() -> dict:
-    return {"status": "ok"}
+    return InlineImage(doc, output, width=docx_cm(4.7), height=docx_cm(4.7))
 
 
-def normalize_items(data_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    normalized: List[Dict[str, Any]] = []
-    for itm in data_items:
-        lp = itm.get("lp") or itm.get("LP") or itm.get("number") or ""
-        nazwa = (
-            itm.get("nazwa_rysunek")
-            or itm.get("NAZWA_RYSUNEK")
-            or itm.get("name")
-            or ""
+def docx_cm(value: float):
+    from docx.shared import Cm
+    return Cm(value)
+
+
+# -----------------------------------------
+#  NORMALIZACJA ITEMÓW
+# -----------------------------------------
+def normalize_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized = []
+
+    for idx, row in enumerate(items, start=1):
+        nr = row.get("LP", idx)
+
+        opis = row.get("OPIS", "")
+        if opis is None:
+            opis = ""
+
+        ilosc = row.get("ILOSC", "")
+        if ilosc is None:
+            ilosc = ""
+
+        nazwa = row.get("NAZWA_RYSUNEK", "")
+        if nazwa is None:
+            nazwa = ""
+
+        foto = row.get("IMAGE", None)
+        inline = None
+
+        if foto and isinstance(foto, str) and foto.startswith("data:image"):
+            try:
+                head, data = foto.split(",", 1)
+                decoded = base64.b64decode(data)
+                inline = decoded
+            except:
+                inline = None
+
+        normalized.append(
+            {
+                "row": nr,
+                "OPIS": str(opis),
+                "ILOSC": str(ilosc),
+                "NAZWA_RYSUNEK": str(nazwa),
+                "IMAGE": inline,  # bytes lub None
+            }
         )
-        ilosc = itm.get("ilosc") or itm.get("ILOSC") or itm.get("qty") or ""
-        opis = itm.get("opis") or itm.get("OPIS") or itm.get("fill") or ""
 
-        row = {
-            "lp": lp,
-            "LP": lp,
-            "nazwa_rysunek": nazwa,
-            "NAZWA_RYSUNEK": nazwa,
-            "ilosc": ilosc,
-            "ILOSC": ilosc,
-            "opis": opis,
-            "OPIS": opis,
-            "IMAGE": None,
-        }
-
-        img_b64 = itm.get("image_base64") or itm.get("image") or ""
-        row["_image_base64"] = img_b64
-
-        normalized.append(row)
     return normalized
 
 
+# -----------------------------------------
+#  KONSTRUKCJA KONTEXTU DO DOCX
+# -----------------------------------------
 def build_context(data: Dict[str, Any]) -> Dict[str, Any]:
     ctx: Dict[str, Any] = {}
 
-    ctx["data"] = data.get("data", "")
-    ctx["DATA"] = ctx["data"]
+    ctx["DATA"] = data.get("data", "")
     ctx["NUMER_OFERTY"] = data.get("numer_oferty", "")
 
-    systemy: List[str] = data.get("systemy", [])
-    ctx["SYSTEMY"] = [s for s in systemy if s.strip()]
+    # SYSTEMY – odporne na None / NaN / liczby
+    systemy = data.get("systemy", [])
+    ctx["SYSTEMY"] = [
+        str(s).strip()
+        for s in systemy
+        if s is not None and str(s).strip()
+    ]
 
     ctx["KOLOR"] = data.get("kolor", "")
     ctx["KWOTA_NETTO"] = data.get("kwota_netto", "")
@@ -82,118 +103,86 @@ def build_context(data: Dict[str, Any]) -> Dict[str, Any]:
     ctx["KLIENT_IMIE"] = data.get("klient_imie", "")
     ctx["KLIENT_EMAIL"] = data.get("klient_email", "")
     ctx["KLIENT_TEL"] = data.get("klient_tel", "")
-
     ctx["LOKALIZACJA_OBIEKTU"] = data.get("lokalizacja_obiektu", "")
 
     ctx["HANDLOWIEC_IMIE"] = data.get("handlowiec_imie", "")
     ctx["HANDLOWIEC_TEL"] = data.get("handlowiec_tel", "")
     ctx["HANDLOWIEC_MAIL"] = data.get("handlowiec_mail", "")
 
-    data_items: List[Dict[str, Any]] = data.get("items", [])
-    ctx["items"] = normalize_items(data_items)
+    # Pozycje
+    items_raw = data.get("items", [])
+    items = normalize_items(items_raw)
+
+    ctx_items = []
+    # wstawiamy obraz do InlineImage
+    for row in items:
+        imgbytes = row["IMAGE"]
+
+        if imgbytes:
+            try:
+                inline = make_inline_image(DocxTemplate("template.docx"), imgbytes)
+            except:
+                inline = None
+        else:
+            inline = None
+
+        ctx_items.append(
+            {
+                "LP": row["row"],
+                "OPIS": row["OPIS"],
+                "ILOSC": row["ILOSC"],
+                "NAZWA_RYSUNEK": row["NAZWA_RYSUNEK"],
+                "IMAGE": inline,
+            }
+        )
+
+    ctx["items"] = ctx_items
 
     return ctx
 
 
-def inject_images(doc: DocxTemplate, ctx: Dict[str, Any]) -> None:
-    items: List[Dict[str, Any]] = ctx.get("items", [])
-    if not items:
-        return
-
-    for row in items:
-        img_b64 = row.get("_image_base64") or ""
-        if not img_b64:
-            row["IMAGE"] = ""
-            continue
-
-        if "," in img_b64:
-            _, b64data = img_b64.split(",", 1)
-        else:
-            b64data = img_b64
-
-        try:
-            img_bytes = base64.b64decode(b64data)
-        except Exception:
-            row["IMAGE"] = ""
-            continue
-
-        tmp_name = f"_img_{uuid4().hex}.png"
-        tmp_path = os.path.join(OUTPUT_DIR, tmp_name)
-
-        try:
-            with open(tmp_path, "wb") as f:
-                f.write(img_bytes)
-
-            # ✔ FINALNY ROZMIAR 4,7 cm × 4,7 cm
-            row["IMAGE"] = InlineImage(doc, tmp_path, width=Mm(47), height=Mm(47))
-
-        except Exception:
-            row["IMAGE"] = ""
+# -----------------------------------------
+#  FASTAPI – GENEROWANIE DOCX
+# -----------------------------------------
+class OfferModel(BaseModel):
+    data: str = ""
+    numer_oferty: str = ""
+    systemy: list = []
+    kolor: str = ""
+    kwota_netto: str = ""
+    klient_imie: str = ""
+    klient_tel: str = ""
+    klient_email: str = ""
+    lokalizacja_obiektu: str = ""
+    handlowiec_imie: str = ""
+    handlowiec_tel: str = ""
+    handlowiec_mail: str = ""
+    items: list = []
 
 
 @app.post("/generate-docx")
-async def generate_docx(
-    payload: str = Form(...),
-    template_file: Optional[UploadFile] = File(None),
-):
+async def generate_docx(payload: OfferModel):
     try:
-        data = json.loads(payload)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"Niepoprawny JSON: {e}")
+        doc = DocxTemplate("template.docx")
+        ctx = build_context(payload.dict())
 
-    if template_file is not None:
-        temp_template_path = os.path.join(TEMPLATES_DIR, f"uploaded_{uuid4().hex}.docx")
-        contents = await template_file.read()
-        with open(temp_template_path, "wb") as f:
-            f.write(contents)
-        template_path = temp_template_path
-    else:
-        if not os.path.exists(DEFAULT_TEMPLATE):
-            raise HTTPException(
-                status_code=500,
-                detail="Brak szablonu oferta_template.docx w folderze templates."
-            )
-        template_path = DEFAULT_TEMPLATE
-
-    try:
-        doc = DocxTemplate(template_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Błąd ładowania szablonu: {e}")
-
-    ctx = build_context(data)
-    inject_images(doc, ctx)
-
-    try:
         doc.render(ctx)
+
+        output = io.BytesIO()
+        doc.save(output)
+        output.seek(0)
+
+        return Response(
+            content=output.read(),
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": f"attachment; filename=oferta.docx"
+            }
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Błąd renderowania: {e}")
-
-    out_name = f"oferta_{uuid4().hex}.docx"
-    out_path = os.path.join(OUTPUT_DIR, out_name)
-
-    try:
-        doc.save(out_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Błąd zapisu pliku: {e}")
-
-    return FileResponse(
-        out_path,
-        filename=out_name,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    )
+        return {"error": str(e)}
 
 
-@app.post("/preview-context")
-async def preview_context(payload: str = Form(...)):
-    try:
-        data = json.loads(payload)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"Niepoprawny JSON: {e}")
-
-    ctx = build_context(data)
-    return JSONResponse(ctx)
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+@app.get("/")
+def root():
+    return {"status": "OK"}
